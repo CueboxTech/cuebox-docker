@@ -12,8 +12,14 @@ on:
       backend_branch:
         description: 'Backend branch'
         default: 'main'
+
+  repository_dispatch:
+    types: [build-image]
+
   push:
     branches: [main]
+    paths:
+      - 'Dockerfile'
 
 env:
   REGISTRY: ghcr.io
@@ -21,6 +27,7 @@ env:
 
 jobs:
   build:
+    name: Build & Push
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -37,22 +44,42 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
-      - uses: docker/build-push-action@v5
+      - name: Set build parameters
+        id: params
+        run: |
+          if [ "${{ github.event_name }}" == "repository_dispatch" ]; then
+            echo "frontend=${{ github.event.client_payload.frontend_branch || 'main' }}" >> $GITHUB_OUTPUT
+            echo "backend=${{ github.event.client_payload.backend_branch || 'main' }}" >> $GITHUB_OUTPUT
+            echo "tag=${{ github.event.client_payload.tag || 'latest' }}" >> $GITHUB_OUTPUT
+          else
+            echo "frontend=${{ github.event.inputs.frontend_branch || 'main' }}" >> $GITHUB_OUTPUT
+            echo "backend=${{ github.event.inputs.backend_branch || 'main' }}" >> $GITHUB_OUTPUT
+            echo "tag=${{ github.event.inputs.tag || 'latest' }}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Build and Push
+        uses: docker/build-push-action@v5
         with:
           context: .
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.inputs.tag || 'latest' }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.params.outputs.tag }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           build-args: |
-            FRONTEND_REPO=https://github.com/CueboxTech/angular-frontend.git
-            FRONTEND_BRANCH=${{ github.event.inputs.frontend_branch || 'main' }}
-            BACKEND_REPO=https://github.com/CueboxTech/be.git
-            BACKEND_BRANCH=${{ github.event.inputs.backend_branch || 'main' }}
+            FRONTEND_BRANCH=${{ steps.params.outputs.frontend }}
+            BACKEND_BRANCH=${{ steps.params.outputs.backend }}
+            GITHUB_TOKEN=${{ secrets.REPO_ACCESS_TOKEN }}
             MONGODB_URI=${{ secrets.MONGODB_URI }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       
-      - run: |
-          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
-          echo "Run: docker run -d -p 8080:80 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+      - name: Summary
+        run: |
+          echo "=========================================="
+          echo "  IMAGE PUSHED"
+          echo "=========================================="
+          echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.params.outputs.tag }}"
+          echo ""
+          echo "  Run:"
+          echo "  docker run -d -p 8080:80 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          echo "=========================================="
