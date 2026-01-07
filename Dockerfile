@@ -2,9 +2,11 @@ FROM node:18-alpine AS frontend-build
 WORKDIR /app
 RUN apk add --no-cache git
 
-ARG FRONTEND_REPO=https://github.com/CueboxTech/angular-frontend.git
+ARG FRONTEND_REPO
 ARG FRONTEND_BRANCH=main
-RUN git clone --depth 1 -b ${FRONTEND_BRANCH} ${FRONTEND_REPO} .
+ARG GITHUB_TOKEN
+
+RUN git clone --depth 1 -b ${FRONTEND_BRANCH} https://${GITHUB_TOKEN}@github.com/CueboxTech/angular-frontend.git .
 
 RUN npm install --legacy-peer-deps --ignore-scripts && \
     npm install @nx/nx-linux-x64-musl --legacy-peer-deps --ignore-scripts || true && \
@@ -24,9 +26,11 @@ FROM maven:3.9-eclipse-temurin-17 AS backend-build
 WORKDIR /app
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
-ARG BACKEND_REPO=https://github.com/CueboxTech/be.git
+ARG BACKEND_REPO
 ARG BACKEND_BRANCH=main
-RUN git clone --depth 1 -b ${BACKEND_BRANCH} ${BACKEND_REPO} .
+ARG GITHUB_TOKEN
+
+RUN git clone --depth 1 -b ${BACKEND_BRANCH} https://${GITHUB_TOKEN}@github.com/CueboxTech/be.git .
 
 ARG MONGODB_URI
 RUN sed -i "s|uri: mongodb://.*|uri: ${MONGODB_URI}|g" src/main/resources/config/application-prod.yml
@@ -70,10 +74,7 @@ export JAVA_OPTS="-Dspring.profiles.active=prod -Xms512m -Xmx1024m"\n\
 $CATALINA_HOME/bin/catalina.sh start\n\
 echo "Starting CueBox..."\n\
 until curl -sf http://127.0.0.1:9090/portal/ >/dev/null 2>&1; do sleep 2; done\n\
-echo "========================================"\n\
-echo "  CueBox Ready!"\n\
-echo "  Access: http://localhost:8080"\n\
-echo "========================================"\n\
+echo "CueBox Ready! http://localhost:8080"\n\
 exec nginx -g "daemon off;"' > /start.sh && chmod +x /start.sh
 
 EXPOSE 80
