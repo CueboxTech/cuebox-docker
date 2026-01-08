@@ -1,12 +1,14 @@
+# syntax=docker/dockerfile:1.4
+
 FROM node:18-alpine AS frontend-build
 WORKDIR /app
 RUN apk add --no-cache git
 
-ARG FRONTEND_REPO
 ARG FRONTEND_BRANCH=main
-ARG GITHUB_TOKEN
 
-RUN git clone --depth 1 -b ${FRONTEND_BRANCH} https://${GITHUB_TOKEN}@github.com/CueboxTech/angular-frontend.git .
+RUN --mount=type=secret,id=github_token \
+    git clone --depth 1 -b ${FRONTEND_BRANCH} \
+    https://$(cat /run/secrets/github_token)@github.com/CueboxTech/angular-frontend.git .
 
 RUN npm install --legacy-peer-deps --ignore-scripts && \
     npm install @nx/nx-linux-x64-musl --legacy-peer-deps --ignore-scripts || true && \
@@ -26,14 +28,14 @@ FROM maven:3.9-eclipse-temurin-17 AS backend-build
 WORKDIR /app
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
-ARG BACKEND_REPO
 ARG BACKEND_BRANCH=main
-ARG GITHUB_TOKEN
 
-RUN git clone --depth 1 -b ${BACKEND_BRANCH} https://${GITHUB_TOKEN}@github.com/CueboxTech/be.git .
+RUN --mount=type=secret,id=github_token \
+    git clone --depth 1 -b ${BACKEND_BRANCH} \
+    https://$(cat /run/secrets/github_token)@github.com/CueboxTech/be.git .
 
-ARG MONGODB_URI
-RUN sed -i "s|uri: mongodb://.*|uri: ${MONGODB_URI}|g" src/main/resources/config/application-prod.yml
+RUN --mount=type=secret,id=mongodb_uri \
+    sed -i "s|uri: mongodb://.*|uri: $(cat /run/secrets/mongodb_uri)|g" src/main/resources/config/application-prod.yml
 
 RUN mkdir -p src/main/java/com/cuebox/portal/config/ && \
     echo 'package com.cuebox.portal.config; import io.swagger.v3.oas.models.servers.Server; import org.springdoc.core.customizers.OpenApiCustomizer; import org.springframework.context.annotation.Bean; import org.springframework.context.annotation.Configuration; import java.util.List; @Configuration public class OpenApiConfig { @Bean public OpenApiCustomizer serverUrlCustomizer() { return openApi -> openApi.setServers(List.of(new Server().url("/portal").description("Local"))); } }' > src/main/java/com/cuebox/portal/config/OpenApiConfig.java
@@ -51,7 +53,7 @@ RUN apt-get update && apt-get install -y openjdk-17-jre-headless nginx curl && \
 
 ENV CATALINA_HOME=/opt/tomcat
 RUN mkdir -p $CATALINA_HOME && \
-    curl -sL https://archive.apache.org/dist/tomcat/tomcat-9/v9.0.85/bin/apache-tomcat-9.0.85.tar.gz | \
+    curl -sL https://archive.apache.org/dist/tomcat/tomcat-10/v10.1.18/bin/apache-tomcat-10.1.18.tar.gz | \
     tar xz --strip-components=1 -C $CATALINA_HOME && \
     rm -rf $CATALINA_HOME/webapps/* && \
     sed -i 's/port="8080"/port="9090"/g' $CATALINA_HOME/conf/server.xml
@@ -73,10 +75,17 @@ set -e\n\
 export JAVA_OPTS="-Dspring.profiles.active=prod -Xms512m -Xmx1024m"\n\
 $CATALINA_HOME/bin/catalina.sh start\n\
 echo "Starting CueBox..."\n\
-until curl -sf http://127.0.0.1:9090/portal/ >/dev/null 2>&1; do sleep 2; done\n\
-echo "CueBox Ready! http://localhost:8080"\n\
+sleep 10\n\
+for i in $(seq 1 60); do\n\
+  if curl -sf http://127.0.0.1:9090/portal/management/health >/dev/null 2>&1; then\n\
+    echo "CueBox Ready! http://localhost:8080"\n\
+    break\n\
+  fi\n\
+  echo "Waiting for backend... ($i/60)"\n\
+  sleep 2\n\
+done\n\
 exec nginx -g "daemon off;"' > /start.sh && chmod +x /start.sh
 
 EXPOSE 80
-HEALTHCHECK --interval=30s --timeout=10s --start-period=90s CMD curl -f http://localhost/ || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s CMD curl -f http://localhost/ || exit 1
 ENTRYPOINT ["/start.sh"]
