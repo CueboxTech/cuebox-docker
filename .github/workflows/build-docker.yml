@@ -57,6 +57,26 @@ jobs:
             echo "tag=${{ github.event.inputs.tag || 'latest' }}" >> $GITHUB_OUTPUT
           fi
       
+      - name: Create secret files
+        run: |
+          echo "${{ secrets.REPO_ACCESS_TOKEN }}" > /tmp/github_token
+          echo "${{ secrets.MONGODB_URI }}" > /tmp/mongodb_uri
+          
+          # Debug: Check if secrets are set (don't print values)
+          if [ -s /tmp/github_token ]; then
+            echo "✓ REPO_ACCESS_TOKEN is set"
+          else
+            echo "✗ REPO_ACCESS_TOKEN is EMPTY or MISSING!"
+            exit 1
+          fi
+          
+          if [ -s /tmp/mongodb_uri ]; then
+            echo "✓ MONGODB_URI is set"
+          else
+            echo "✗ MONGODB_URI is EMPTY or MISSING!"
+            exit 1
+          fi
+      
       - name: Build and Push
         uses: docker/build-push-action@v5
         with:
@@ -68,10 +88,15 @@ jobs:
           build-args: |
             FRONTEND_BRANCH=${{ steps.params.outputs.frontend }}
             BACKEND_BRANCH=${{ steps.params.outputs.backend }}
-            GITHUB_TOKEN=${{ secrets.REPO_ACCESS_TOKEN }}
-            MONGODB_URI=${{ secrets.MONGODB_URI }}
+          secret-files: |
+            github_token=/tmp/github_token
+            mongodb_uri=/tmp/mongodb_uri
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      
+      - name: Cleanup secrets
+        if: always()
+        run: rm -f /tmp/github_token /tmp/mongodb_uri
       
       - name: Summary
         run: |
