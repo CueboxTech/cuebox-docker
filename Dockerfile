@@ -35,7 +35,13 @@ RUN --mount=type=secret,id=github_token \
     https://$(cat /run/secrets/github_token)@github.com/CueboxTech/be.git .
 
 RUN --mount=type=secret,id=mongodb_uri \
-    sed -i "s|uri: mongodb://.*|uri: $(cat /run/secrets/mongodb_uri)|g" src/main/resources/config/application-prod.yml
+    sed -i "s|uri: mongodb://.*|uri: $(cat /run/secrets/mongodb_uri)|g" src/main/resources/config/application-prod.yml && \
+    echo "" >> src/main/resources/config/application-prod.yml && \
+    echo "spring:" >> src/main/resources/config/application-prod.yml && \
+    echo "  servlet:" >> src/main/resources/config/application-prod.yml && \
+    echo "    multipart:" >> src/main/resources/config/application-prod.yml && \
+    echo "      max-file-size: 50MB" >> src/main/resources/config/application-prod.yml && \
+    echo "      max-request-size: 50MB" >> src/main/resources/config/application-prod.yml
 
 RUN mkdir -p src/main/java/com/cuebox/portal/config/ && \
     echo 'package com.cuebox.portal.config; import io.swagger.v3.oas.models.servers.Server; import org.springdoc.core.customizers.OpenApiCustomizer; import org.springframework.context.annotation.Bean; import org.springframework.context.annotation.Configuration; import java.util.List; @Configuration public class OpenApiConfig { @Bean public OpenApiCustomizer serverUrlCustomizer() { return openApi -> openApi.setServers(List.of(new Server().url("/portal").description("Local"))); } }' > src/main/java/com/cuebox/portal/config/OpenApiConfig.java
@@ -61,13 +67,28 @@ RUN mkdir -p $CATALINA_HOME && \
 COPY --from=frontend-build /app/dist/demo1 /var/www/html
 COPY --from=backend-build /app/target/*.war $CATALINA_HOME/webapps/portal.war
 
-RUN echo 'server { \
-    listen 80; \
-    root /var/www/html; \
-    index index.html; \
-    location / { try_files $uri $uri/ /index.html; } \
-    location /api/ { proxy_pass http://127.0.0.1:9090/portal/api/; proxy_connect_timeout 300; proxy_send_timeout 300; proxy_read_timeout 300; } \
-    location /portal/ { proxy_pass http://127.0.0.1:9090/portal/; } \
+RUN echo 'server {\n\
+    listen 80;\n\
+    root /var/www/html;\n\
+    index index.html;\n\
+    client_max_body_size 50M;\n\
+\n\
+    location / {\n\
+        try_files $uri $uri/ /index.html;\n\
+    }\n\
+\n\
+    location /api/ {\n\
+        proxy_pass http://127.0.0.1:9090/portal/api/;\n\
+        proxy_connect_timeout 300;\n\
+        proxy_send_timeout 300;\n\
+        proxy_read_timeout 300;\n\
+        client_max_body_size 50M;\n\
+    }\n\
+\n\
+    location /portal/ {\n\
+        proxy_pass http://127.0.0.1:9090/portal/;\n\
+        client_max_body_size 50M;\n\
+    }\n\
 }' > /etc/nginx/sites-available/default
 
 RUN echo '#!/bin/bash\n\
