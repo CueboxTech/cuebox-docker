@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.4
+
 
 FROM node:18-alpine AS frontend-build
 WORKDIR /app
@@ -35,13 +35,7 @@ RUN --mount=type=secret,id=github_token \
     https://$(cat /run/secrets/github_token)@github.com/CueboxTech/be.git .
 
 RUN --mount=type=secret,id=mongodb_uri \
-    sed -i "s|uri: mongodb://.*|uri: $(cat /run/secrets/mongodb_uri)|g" src/main/resources/config/application-prod.yml && \
-    echo "" >> src/main/resources/config/application-prod.yml && \
-    echo "spring:" >> src/main/resources/config/application-prod.yml && \
-    echo "  servlet:" >> src/main/resources/config/application-prod.yml && \
-    echo "    multipart:" >> src/main/resources/config/application-prod.yml && \
-    echo "      max-file-size: 50MB" >> src/main/resources/config/application-prod.yml && \
-    echo "      max-request-size: 50MB" >> src/main/resources/config/application-prod.yml
+    sed -i "s|uri: mongodb://.*|uri: $(cat /run/secrets/mongodb_uri)|g" src/main/resources/config/application-prod.yml
 
 RUN mkdir -p src/main/java/com/cuebox/portal/config/ && \
     echo 'package com.cuebox.portal.config; import io.swagger.v3.oas.models.servers.Server; import org.springdoc.core.customizers.OpenApiCustomizer; import org.springframework.context.annotation.Bean; import org.springframework.context.annotation.Configuration; import java.util.List; @Configuration public class OpenApiConfig { @Bean public OpenApiCustomizer serverUrlCustomizer() { return openApi -> openApi.setServers(List.of(new Server().url("/portal").description("Local"))); } }' > src/main/java/com/cuebox/portal/config/OpenApiConfig.java
