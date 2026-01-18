@@ -1,5 +1,3 @@
-
-
 FROM node:18-alpine AS frontend-build
 WORKDIR /app
 RUN apk add --no-cache git
@@ -81,6 +79,11 @@ RUN echo 'server {\n\
 \n\
     location /portal/ {\n\
         proxy_pass http://127.0.0.1:9090/portal/;\n\
+        client_max_body_size 50M;\n\
+    }\n\
+\n\
+    location /store/ {\n\
+        proxy_pass http://127.0.0.1:9090/store/;\n\
         client_max_body_size 50M;\n\
     }\n\
 }' > /etc/nginx/sites-available/default
