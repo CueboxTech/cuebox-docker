@@ -406,6 +406,35 @@ public class Attachmentresource {
 }
 EOF
 
+# ============================================
+# CRITICAL FIX: Patch DocumentClassifyAndExtractService.java
+# This is where document uploads happen - must use local MongoDB!
+# ============================================
+RUN echo "Patching DocumentClassifyAndExtractService.java to use SmartstoreLocalService..." && \
+    # Step 1: Add import for SmartstoreLocalService
+    sed -i 's/import com.cuebox.portal.repository.SmartstoreConfigRepository;/import com.cuebox.portal.repository.SmartstoreConfigRepository;\nimport com.cuebox.portal.service.SmartstoreLocalService;/' \
+        src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java && \
+    # Step 2: Add @Autowired field for SmartstoreLocalService after SmartstoreConfigRepository
+    sed -i '/@Autowired/,/SmartstoreConfigRepository smartstoreConfigRepository;/{
+        /SmartstoreConfigRepository smartstoreConfigRepository;/a\
+\
+\t@Autowired\
+\tSmartstoreLocalService smartstoreLocalService;
+    }' src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java && \
+    # Step 3: Replace direct repository call with local-first approach
+    sed -i 's/SmartstoreConfig smartstoreConfig = smartstoreConfigRepository.findById("1000").orElseThrow();/SmartstoreConfig smartstoreConfig = smartstoreLocalService.getConfig(); if (smartstoreConfig == null) { smartstoreConfig = smartstoreConfigRepository.findById("1000").orElseThrow(); }/' \
+        src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java && \
+    echo "Patch applied!"
+
+# Verify the patch was successful
+RUN echo "Verifying DocumentClassifyAndExtractService.java patch..." && \
+    grep -q "SmartstoreLocalService" src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java && \
+    grep -q "smartstoreLocalService.getConfig()" src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java && \
+    echo "✓ DocumentClassifyAndExtractService.java patched successfully!" || \
+    (echo "✗ PATCH FAILED! Build will continue but local MongoDB may not work for uploads." && \
+     echo "Content of file:" && \
+     head -100 src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java)
+
 RUN sed -i "s|allowed-origins:.*|allowed-origins: '*'|g" src/main/resources/config/application-dev.yml && \
     sed -i "s|allowed-origin-patterns:.*|allowed-origin-patterns: '*'|g" src/main/resources/config/application-dev.yml
 
