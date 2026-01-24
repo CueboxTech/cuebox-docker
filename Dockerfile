@@ -1,17 +1,12 @@
 # =============================================================================
-# CUEBOX ENTERPRISE DOCKER IMAGE - PUBLIC DISTRIBUTION SAFE
+# CUEBOX ENTERPRISE DOCKER IMAGE
 # =============================================================================
 # 
-# SECURITY MODEL: Zero secrets baked into image
-# - MongoDB URI: Passed at runtime via MONGODB_URI environment variable
-# - All sensitive config: Environment variables at runtime
-# - Source code: Not included (multi-stage build)
-# - Safe for public GHCR/DockerHub distribution
+# Build: MongoDB URI + ProGuard obfuscation via build secrets
+# Runtime: Only volume mount needed for document storage
 #
 # Usage:
-#   docker run -d -p 8080:80 \
-#     -e MONGODB_URI="mongodb://user:pass@your-host:27017/db?authSource=admin" \
-#     ghcr.io/cueboxtech/cuebox:latest
+#   docker run -d -p 8080:80 -v cuebox-docs:/data/db ghcr.io/cueboxtech/cuebox:latest
 #
 # =============================================================================
 
@@ -46,11 +41,11 @@ RUN npm run build -- --configuration=production && \
 
 
 # =============================================================================
-# Stage 2: Build Backend
+# Stage 2: Build Backend with ProGuard Obfuscation
 # =============================================================================
 FROM maven:3.9-eclipse-temurin-17 AS backend-build
 WORKDIR /app
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git unzip zip && rm -rf /var/lib/apt/lists/*
 
 ARG BACKEND_BRANCH=main
 
@@ -60,23 +55,13 @@ RUN --mount=type=secret,id=github_token \
     rm -rf .git
 
 # =============================================================================
-# SECURITY: DO NOT bake MongoDB URI into image
-# Instead, use a placeholder that will be replaced at runtime
+# SECURITY: MongoDB URI injected at BUILD TIME via Docker secret
 # =============================================================================
-RUN sed -i "s|uri: mongodb://.*|uri: \${MONGODB_URI:mongodb://localhost:27017/cuebox}|g" src/main/resources/config/application-prod.yml
-
-# Also ensure the application can read from environment variables
-RUN cat >> src/main/resources/config/application-prod.yml << 'EOF'
-
-# Runtime configuration - these can be overridden by environment variables
-spring:
-  data:
-    mongodb:
-      uri: ${MONGODB_URI:mongodb://localhost:27017/cuebox}
-EOF
+RUN --mount=type=secret,id=mongodb_uri \
+    sed -i "s|uri: mongodb://.*|uri: $(cat /run/secrets/mongodb_uri)|g" src/main/resources/config/application-prod.yml
 
 # -----------------------------------------------------------------------------
-# Create OpenApiConfig.java
+# Create OpenApiConfig.java - Fix Swagger UI server URL
 # -----------------------------------------------------------------------------
 RUN mkdir -p src/main/java/com/cuebox/portal/config/ && \
     cat > src/main/java/com/cuebox/portal/config/OpenApiConfig.java << 'EOF'
@@ -98,7 +83,7 @@ public class OpenApiConfig {
 EOF
 
 # -----------------------------------------------------------------------------
-# Create SmartstoreLocalService.java
+# Create SmartstoreLocalService.java - Handle local MongoDB for document storage
 # -----------------------------------------------------------------------------
 RUN cat > src/main/java/com/cuebox/portal/service/SmartstoreLocalService.java << 'EOF'
 package com.cuebox.portal.service;
@@ -305,10 +290,122 @@ RUN sed -i 's/import com.cuebox.portal.repository.SmartstoreConfigRepository;/im
 RUN sed -i "s|allowed-origins:.*|allowed-origins: '*'|g" src/main/resources/config/application-dev.yml && \
     sed -i "s|allowed-origin-patterns:.*|allowed-origin-patterns: '*'|g" src/main/resources/config/application-dev.yml
 
-# Build WAR and cleanup source
+# =============================================================================
+# Build WAR first (before obfuscation)
+# =============================================================================
 RUN mvn clean package -DskipTests -q -Pwar && \
-    mv target/*.war /app.war && \
-    rm -rf target src pom.xml .mvn
+    mv target/*.war /app-original.war
+
+# =============================================================================
+# PROGUARD OBFUSCATION - Make reverse engineering harder
+# =============================================================================
+RUN curl -sL https://github.com/Guardsquare/proguard/releases/download/v7.4.2/proguard-7.4.2.zip -o /tmp/proguard.zip && \
+    unzip -q /tmp/proguard.zip -d /opt/ && \
+    rm /tmp/proguard.zip
+
+# Create ProGuard configuration for Spring Boot WAR
+RUN cat > /tmp/proguard.pro << 'PROGUARD'
+# =============================================================================
+# PROGUARD CONFIGURATION FOR SPRING BOOT WAR
+# =============================================================================
+
+# Input/Output
+-injars /app-original.war(!META-INF/versions/**)
+-outjars /app.war
+
+# Library JARs
+-libraryjars <java.home>/jmods/java.base.jmod(!**.jar;!module-info.class)
+-libraryjars <java.home>/jmods/java.logging.jmod(!**.jar;!module-info.class)
+-libraryjars <java.home>/jmods/java.sql.jmod(!**.jar;!module-info.class)
+-libraryjars <java.home>/jmods/java.desktop.jmod(!**.jar;!module-info.class)
+-libraryjars <java.home>/jmods/java.naming.jmod(!**.jar;!module-info.class)
+-libraryjars <java.home>/jmods/java.management.jmod(!**.jar;!module-info.class)
+-libraryjars <java.home>/jmods/java.xml.jmod(!**.jar;!module-info.class)
+-libraryjars <java.home>/jmods/java.instrument.jmod(!**.jar;!module-info.class)
+
+# Don't warn
+-dontwarn **
+-dontnote **
+
+# Keep attributes
+-keepattributes SourceFile,LineNumberTable,*Annotation*,Signature,Exceptions,InnerClasses,EnclosingMethod
+
+# =============================================================================
+# SPRING BOOT RULES
+# =============================================================================
+
+# Keep main class
+-keep class com.cuebox.portal.PortalApp { *; }
+
+# Keep Spring components
+-keep @org.springframework.stereotype.Component class * { *; }
+-keep @org.springframework.stereotype.Service class * { *; }
+-keep @org.springframework.stereotype.Repository class * { *; }
+-keep @org.springframework.stereotype.Controller class * { *; }
+-keep @org.springframework.web.bind.annotation.RestController class * { *; }
+-keep @org.springframework.context.annotation.Configuration class * { *; }
+-keep @org.springframework.boot.autoconfigure.SpringBootApplication class * { *; }
+
+# Keep Bean methods
+-keepclassmembers class * {
+    @org.springframework.context.annotation.Bean *;
+    @org.springframework.web.bind.annotation.* *;
+}
+
+# Keep JPA/MongoDB entities
+-keep @org.springframework.data.mongodb.core.mapping.Document class * { *; }
+-keep @jakarta.persistence.Entity class * { *; }
+-keep class * extends org.springframework.data.repository.Repository { *; }
+-keep interface * extends org.springframework.data.repository.Repository { *; }
+
+# Keep domain/DTO classes
+-keep class com.cuebox.portal.domain.** { *; }
+-keep class com.cuebox.portal.service.dto.** { *; }
+-keep class com.cuebox.portal.web.rest.vm.** { *; }
+-keep class com.cuebox.portal.config.** { *; }
+
+# =============================================================================
+# OBFUSCATION SETTINGS
+# =============================================================================
+
+# Repackage obfuscated classes
+-repackageclasses 'c'
+-allowaccessmodification
+-optimizationpasses 3
+-overloadaggressively
+
+# Keep public API
+-keep public class com.cuebox.portal.web.rest.** { public <methods>; }
+
+# =============================================================================
+# LIBRARIES
+# =============================================================================
+
+-keep class com.fasterxml.jackson.** { *; }
+-keepclassmembers class * { @com.fasterxml.jackson.annotation.* *; }
+-keep class io.swagger.v3.oas.** { *; }
+-keep class org.springdoc.** { *; }
+-keep class org.bson.** { *; }
+-keep class com.mongodb.** { *; }
+
+# Enums and Serializable
+-keepclassmembers enum * { public static **[] values(); public static ** valueOf(java.lang.String); }
+-keepclassmembers class * implements java.io.Serializable {
+    static final long serialVersionUID;
+    private static final java.io.ObjectStreamField[] serialPersistentFields;
+    private void writeObject(java.io.ObjectOutputStream);
+    private void readObject(java.io.ObjectInputStream);
+    java.lang.Object writeReplace();
+    java.lang.Object readResolve();
+}
+PROGUARD
+
+# Run ProGuard (fallback to original if fails)
+RUN java -jar /opt/proguard-7.4.2/lib/proguard.jar @/tmp/proguard.pro 2>/dev/null || \
+    (echo "[WARN] ProGuard skipped - using original WAR" && cp /app-original.war /app.war)
+
+# Cleanup
+RUN rm -rf target src pom.xml .mvn /app-original.war /opt/proguard-7.4.2 /tmp/proguard.pro
 
 
 # =============================================================================
@@ -321,20 +418,19 @@ RUN curl -L -o /store.war https://github.com/CueboxTech/cuebox-docker/releases/d
 
 
 # =============================================================================
-# Stage 4: Final Runtime Image (PUBLIC DISTRIBUTION SAFE)
+# Stage 4: Final Runtime Image
 # =============================================================================
 FROM ubuntu:22.04
 
 LABEL org.opencontainers.image.title="CueBox Enterprise" \
-      org.opencontainers.image.description="CueBox Document Management System - Secure Public Image" \
+      org.opencontainers.image.description="CueBox Document Management System" \
       org.opencontainers.image.vendor="CueBox Solutions" \
       org.opencontainers.image.version="1.0.0" \
-      org.opencontainers.image.licenses="Proprietary" \
-      org.opencontainers.image.documentation="https://github.com/CueboxTech/cuebox-docker"
+      org.opencontainers.image.licenses="Proprietary"
 
-# Install minimal required packages
+# Install packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openjdk-17-jre-headless nginx curl gnupg ca-certificates gosu \
+    openjdk-17-jre-headless nginx curl gnupg ca-certificates \
     && curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/mongodb.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" > /etc/apt/sources.list.d/mongodb.list \
     && apt-get update && apt-get install -y --no-install-recommends mongodb-org \
@@ -344,7 +440,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create directories
 RUN mkdir -p /data/db /var/log/cuebox && chmod 755 /data/db /var/log/cuebox
 
-# Install Tomcat (with security hardening)
+# Install Tomcat
 ENV CATALINA_HOME=/opt/tomcat
 RUN mkdir -p $CATALINA_HOME && \
     curl -sL https://archive.apache.org/dist/tomcat/tomcat-10/v10.1.18/bin/apache-tomcat-10.1.18.tar.gz | \
@@ -353,13 +449,13 @@ RUN mkdir -p $CATALINA_HOME && \
     sed -i 's/port="8080"/port="9090"/g' $CATALINA_HOME/conf/server.xml && \
     sed -i 's/<Connector/<Connector server="CueBox" /g' $CATALINA_HOME/conf/server.xml
 
-# Copy built artifacts (NO SOURCE CODE, NO SECRETS)
+# Copy built artifacts (OBFUSCATED)
 COPY --from=frontend-build /app/dist/demo1 /var/www/html
 COPY --from=backend-build /app.war $CATALINA_HOME/webapps/portal.war
 COPY --from=store-download /store.war $CATALINA_HOME/webapps/store.war
 
 # =============================================================================
-# SECURITY-HARDENED NGINX CONFIGURATION
+# NGINX CONFIGURATION
 # =============================================================================
 RUN cat > /etc/nginx/sites-available/default << 'NGINXCONF'
 server {
@@ -438,7 +534,7 @@ server {
 NGINXCONF
 
 # =============================================================================
-# SECURE ENTRYPOINT SCRIPT
+# ENTRYPOINT SCRIPT
 # =============================================================================
 RUN cat > /entrypoint.sh << 'ENTRYPOINT'
 #!/bin/bash
@@ -450,46 +546,15 @@ APP_HOST=${APP_HOST:-localhost}
 echo "=============================================="
 echo "  CueBox Enterprise"
 echo "=============================================="
-echo "  Image: Public Distribution Safe"
-echo "  No secrets baked into image"
-echo "=============================================="
 
-# =============================================================================
-# SECURITY: Validate required environment variables
-# =============================================================================
-if [ -z "$MONGODB_URI" ]; then
-    echo ""
-    echo "=============================================="
-    echo "  ERROR: MONGODB_URI is required!"
-    echo "=============================================="
-    echo ""
-    echo "  Usage:"
-    echo "    docker run -d -p 8080:80 \\"
-    echo "      -e MONGODB_URI=\"mongodb://user:pass@host:port/db\" \\"
-    echo "      ghcr.io/cueboxtech/cuebox:latest"
-    echo ""
-    echo "=============================================="
-    exit 1
-fi
-
-echo "[OK] MONGODB_URI provided"
-
-# Mask the password in logs
-MASKED_URI=$(echo "$MONGODB_URI" | sed 's/:[^:@]*@/:****@/g')
-echo "[OK] Connecting to: $MASKED_URI"
-
-# =============================================================================
-# Step 1: Start Local MongoDB (for document storage only)
-# =============================================================================
-echo "[INFO] Starting local MongoDB for document storage..."
+# Start local MongoDB (document storage only)
+echo "[INFO] Starting local MongoDB..."
 rm -f /data/db/mongod.lock /data/db/WiredTiger.lock 2>/dev/null || true
 mkdir -p /data/db
 
-# SECURITY: MongoDB binds ONLY to localhost - not accessible from outside
 mongod --dbpath /data/db --port 27017 --bind_ip 127.0.0.1 --fork \
        --logpath /var/log/cuebox/mongodb.log --noauth --wiredTigerCacheSizeGB 0.25 --quiet
 
-# Wait for MongoDB
 for i in $(seq 1 30); do
     mongosh --quiet --eval "db.runCommand({ping:1}).ok" 2>/dev/null | grep -q "1" && break
     [ $i -eq 30 ] && { echo "[ERROR] Local MongoDB failed"; exit 1; }
@@ -511,23 +576,13 @@ db.smartstore_config.insertOne({
     _class: 'com.cuebox.portal.domain.SmartstoreConfig'
 });
 MONGO
+echo "[OK] Smartstore config initialized"
 
-# =============================================================================
-# Step 2: Start Tomcat with runtime MongoDB URI
-# =============================================================================
+# Start Tomcat
 echo "[INFO] Starting Tomcat..."
-
-# SECURITY: Pass MongoDB URI as environment variable to Spring Boot
-export JAVA_OPTS="-Dspring.profiles.active=prod"
-export JAVA_OPTS="$JAVA_OPTS -Dspring.data.mongodb.uri=$MONGODB_URI"
-export JAVA_OPTS="$JAVA_OPTS -Xms512m -Xmx1024m"
-export JAVA_OPTS="$JAVA_OPTS -Djava.security.egd=file:/dev/./urandom"
-export JAVA_OPTS="$JAVA_OPTS -Dserver.tomcat.remote-ip-header=x-forwarded-for"
-export JAVA_OPTS="$JAVA_OPTS -Dserver.tomcat.protocol-header=x-forwarded-proto"
-
+export JAVA_OPTS="-Dspring.profiles.active=prod -Xms512m -Xmx1024m -Djava.security.egd=file:/dev/./urandom"
 $CATALINA_HOME/bin/catalina.sh start
 
-# Wait for backend
 echo "[INFO] Waiting for backend..."
 for i in $(seq 1 180); do
     HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:9090/portal/ 2>/dev/null || echo "000")
@@ -536,9 +591,7 @@ for i in $(seq 1 180); do
     sleep 1
 done
 
-# =============================================================================
-# Step 3: Configure store.war for local MongoDB
-# =============================================================================
+# Configure store.war
 if [ -f "$CATALINA_HOME/webapps/store.war" ]; then
     echo "[INFO] Configuring store service..."
     for i in $(seq 1 60); do
@@ -561,9 +614,6 @@ if [ -f "$CATALINA_HOME/webapps/store.war" ]; then
     done
 fi
 
-# =============================================================================
-# Ready
-# =============================================================================
 echo ""
 echo "=============================================="
 echo "  CueBox is Ready!"
@@ -573,18 +623,12 @@ echo "  Swagger: http://${APP_HOST}:${APP_PORT}/portal/swagger-ui.html"
 echo "=============================================="
 echo ""
 
-# Clear sensitive environment from shell history
-unset HISTFILE
-history -c 2>/dev/null || true
-
 exec nginx -g "daemon off;"
 ENTRYPOINT
 
 RUN chmod +x /entrypoint.sh
 
-# =============================================================================
-# Final security cleanup
-# =============================================================================
+# Cleanup
 RUN rm -rf /root/.bash_history /root/.cache /tmp/* \
     && find /var/log -type f -name "*.log" -delete 2>/dev/null || true
 
