@@ -122,7 +122,6 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Features" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ MongoDB URI baked at build time (secure)" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ ProGuard obfuscation (bytecode protection)" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Multi-stage build (no source code)" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Security headers enabled" >> $GITHUB_STEP_SUMMARY
 
@@ -218,14 +217,6 @@ jobs:
           docker run --rm --entrypoint="" ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }} \
             sh -c "find / -name '.git' -type d 2>/dev/null | head -5 | grep . && exit 1 || echo '✅ No .git directories'" || true
       
-      - name: Verify ProGuard obfuscation
-        run: |
-          echo "🔍 Checking for obfuscation..."
-          
-          # Check if classes are obfuscated (look for short class names like 'a', 'b', 'c')
-          docker run --rm --entrypoint="" ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }} \
-            sh -c "unzip -l /opt/tomcat/webapps/portal.war 2>/dev/null | grep -E 'WEB-INF/classes/c/[a-z]\.class' && echo '✅ Obfuscated classes found' || echo '⚠️ Obfuscation may not be applied'" || true
-      
       - name: Test container startup
         run: |
           echo "🔍 Testing container startup..."
@@ -258,7 +249,6 @@ jobs:
           echo "| No secrets in layers | ✅ |" >> $GITHUB_STEP_SUMMARY
           echo "| No source code | ✅ |" >> $GITHUB_STEP_SUMMARY
           echo "| No .git directories | ✅ |" >> $GITHUB_STEP_SUMMARY
-          echo "| ProGuard obfuscation | ✅ |" >> $GITHUB_STEP_SUMMARY
           echo "| Container startup | ✅ |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Image is ready for distribution.**" >> $GITHUB_STEP_SUMMARY
