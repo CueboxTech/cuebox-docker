@@ -1,3 +1,4 @@
+
 FROM node:18-alpine AS frontend-build
 WORKDIR /app
 RUN apk add --no-cache git
@@ -12,6 +13,7 @@ RUN npm install --legacy-peer-deps --ignore-scripts && \
     npm install @nx/nx-linux-x64-musl --legacy-peer-deps --ignore-scripts || true && \
     npm rebuild || true
 
+# Configure frontend for Docker environment
 RUN sed -i "s|baseURL:.*|baseURL: '/api',|g" src/environments/environment.prod.ts && \
     sed -i "s|appThemeName: 'Metronic'|appThemeName: 'CueBox'|g" src/environments/environment.prod.ts && \
     sed -i "s|appThemeName: 'Metronic'|appThemeName: 'CueBox'|g" src/environments/environment.ts && \
@@ -22,6 +24,9 @@ ENV CI=false NX_DAEMON=false
 RUN npm run build -- --configuration=production
 
 
+# -----------------------------------------------------------------------------
+# Stage 2: Build Backend
+# -----------------------------------------------------------------------------
 FROM maven:3.9-eclipse-temurin-17 AS backend-build
 WORKDIR /app
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
@@ -32,10 +37,13 @@ RUN --mount=type=secret,id=github_token \
     git clone --depth 1 -b ${BACKEND_BRANCH} \
     https://$(cat /run/secrets/github_token)@github.com/CueboxTech/be.git .
 
+# Configure MongoDB URI for production (external MongoDB)
 RUN --mount=type=secret,id=mongodb_uri \
     sed -i "s|uri: mongodb://.*|uri: $(cat /run/secrets/mongodb_uri)|g" src/main/resources/config/application-prod.yml
 
-# OpenApiConfig.java
+# -----------------------------------------------------------------------------
+# Create OpenApiConfig.java - Fix Swagger UI server URL
+# -----------------------------------------------------------------------------
 RUN mkdir -p src/main/java/com/cuebox/portal/config/ && \
     cat > src/main/java/com/cuebox/portal/config/OpenApiConfig.java << 'EOF'
 package com.cuebox.portal.config;
@@ -55,7 +63,9 @@ public class OpenApiConfig {
 }
 EOF
 
-# SmartstoreLocalService.java
+# -----------------------------------------------------------------------------
+# Create SmartstoreLocalService.java - Handle local MongoDB for document storage
+# -----------------------------------------------------------------------------
 RUN cat > src/main/java/com/cuebox/portal/service/SmartstoreLocalService.java << 'EOF'
 package com.cuebox.portal.service;
 
@@ -239,7 +249,9 @@ public class SmartstoreLocalService {
 }
 EOF
 
-# Attachmentresource.java
+# -----------------------------------------------------------------------------
+# Create Attachmentresource.java - REST endpoint for document attachments
+# -----------------------------------------------------------------------------
 RUN cat > src/main/java/com/cuebox/portal/web/rest/Attachmentresource.java << 'EOF'
 package com.cuebox.portal.web.rest;
 
@@ -326,30 +338,38 @@ public class Attachmentresource {
 }
 EOF
 
-# CRITICAL: Patch DocumentClassifyAndExtractService.java - separate RUN commands
+# -----------------------------------------------------------------------------
+# Patch DocumentClassifyAndExtractService.java to use local smartstore
+# -----------------------------------------------------------------------------
 RUN sed -i 's/import com.cuebox.portal.repository.SmartstoreConfigRepository;/import com.cuebox.portal.repository.SmartstoreConfigRepository;\nimport com.cuebox.portal.service.SmartstoreLocalService;/' src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java
 
 RUN sed -i 's/SmartstoreConfigRepository smartstoreConfigRepository;/SmartstoreConfigRepository smartstoreConfigRepository;\n\n\t@Autowired\n\tSmartstoreLocalService smartstoreLocalService;/' src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java
 
 RUN sed -i 's/SmartstoreConfig smartstoreConfig = smartstoreConfigRepository.findById("1000").orElseThrow();/SmartstoreConfig smartstoreConfig = smartstoreLocalService.getConfig(); if (smartstoreConfig == null) { smartstoreConfig = smartstoreConfigRepository.findById("1000").orElseThrow(); }/' src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java
 
-# Verify patch
+# Verify patch was applied
 RUN grep -q "SmartstoreLocalService" src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java && \
     grep -q "smartstoreLocalService.getConfig()" src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java && \
     echo "DocumentClassifyAndExtractService.java patched successfully!" || \
     (echo "PATCH FAILED!" && head -80 src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java && exit 1)
 
+# Configure CORS for development
 RUN sed -i "s|allowed-origins:.*|allowed-origins: '*'|g" src/main/resources/config/application-dev.yml && \
     sed -i "s|allowed-origin-patterns:.*|allowed-origin-patterns: '*'|g" src/main/resources/config/application-dev.yml
 
+# Build the backend WAR
 RUN mvn clean package -DskipTests -q -Pwar
 RUN ls -la target/*.war || (echo "WAR file not created!" && exit 1)
 
 
+# -----------------------------------------------------------------------------
+# Stage 3: Final Runtime Image
+# -----------------------------------------------------------------------------
 FROM ubuntu:22.04
 
+# Install dependencies
 RUN apt-get update && apt-get install -y \
-    openjdk-17-jre-headless nginx curl gnupg netcat-openbsd procps \
+    openjdk-17-jre-headless nginx curl gnupg netcat-openbsd procps unzip \
     && curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/mongodb.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" > /etc/apt/sources.list.d/mongodb.list \
     && apt-get update && apt-get install -y mongodb-org \
@@ -357,6 +377,7 @@ RUN apt-get update && apt-get install -y \
     && mkdir -p /data/db && chmod 777 /data/db \
     && mkdir -p /var/log && touch /var/log/mongodb.log && chmod 666 /var/log/mongodb.log
 
+# Install Tomcat
 ENV CATALINA_HOME=/opt/tomcat
 RUN mkdir -p $CATALINA_HOME && \
     curl -sL https://archive.apache.org/dist/tomcat/tomcat-10/v10.1.18/bin/apache-tomcat-10.1.18.tar.gz | \
@@ -365,20 +386,48 @@ RUN mkdir -p $CATALINA_HOME && \
     sed -i 's/port="8080"/port="9090"/g' $CATALINA_HOME/conf/server.xml && \
     mkdir -p $CATALINA_HOME/logs && chmod 755 $CATALINA_HOME/logs
 
+# Copy built artifacts
 COPY --from=frontend-build /app/dist/demo1 /var/www/html
 COPY --from=backend-build /app/target/*.war $CATALINA_HOME/webapps/portal.war
 
+# -----------------------------------------------------------------------------
+# CRITICAL: Download store.war from GitHub release
+# This is a pre-built smartstore service for document storage
+# -----------------------------------------------------------------------------
+ARG STORE_WAR_URL=""
+RUN if [ -n "$STORE_WAR_URL" ]; then \
+        echo "Downloading store.war from: $STORE_WAR_URL" && \
+        curl -L -o $CATALINA_HOME/webapps/store.war "$STORE_WAR_URL"; \
+    else \
+        echo "WARNING: STORE_WAR_URL not provided. Store.war must be added manually or via volume mount."; \
+    fi
+
+# -----------------------------------------------------------------------------
+# Nginx Configuration
+# CRITICAL: Listen on BOTH port 80 AND 8080 inside the container
+# - Port 80 is for external access (mapped to host 8080)
+# - Port 8080 is for internal Java app calls (localhost:8080/store/...)
+# -----------------------------------------------------------------------------
 RUN cat > /etc/nginx/sites-available/default << 'EOF'
 server {
     listen 80;
+    listen 8080;
+    
     root /var/www/html;
     index index.html;
-    client_max_body_size 50M;
+    client_max_body_size 100M;
+    
     proxy_connect_timeout 300;
     proxy_send_timeout 300;
     proxy_read_timeout 300;
     send_timeout 300;
-    location / { try_files $uri $uri/ /index.html; }
+    
+    # Frontend - Angular SPA
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+    
+    # Backend API
     location /api/ {
         proxy_pass http://127.0.0.1:9090/portal/api/;
         proxy_http_version 1.1;
@@ -389,8 +438,10 @@ server {
         proxy_connect_timeout 300;
         proxy_send_timeout 300;
         proxy_read_timeout 300;
-        client_max_body_size 50M;
+        client_max_body_size 100M;
     }
+    
+    # Portal direct access (Swagger, etc)
     location /portal/ {
         proxy_pass http://127.0.0.1:9090/portal/;
         proxy_http_version 1.1;
@@ -398,8 +449,10 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        client_max_body_size 50M;
+        client_max_body_size 100M;
     }
+    
+    # Smartstore - Document storage service
     location /store/ {
         proxy_pass http://127.0.0.1:9090/store/;
         proxy_http_version 1.1;
@@ -407,41 +460,104 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        client_max_body_size 50M;
+        proxy_connect_timeout 300;
+        proxy_send_timeout 300;
+        proxy_read_timeout 300;
+        client_max_body_size 100M;
     }
-    location /health { access_log off; return 200 'OK'; add_header Content-Type text/plain; }
+    
+    # Health check endpoint
+    location /health {
+        access_log off;
+        return 200 'OK';
+        add_header Content-Type text/plain;
+    }
 }
 EOF
 
-RUN cat > /start.sh << 'BASHEOF'
+# -----------------------------------------------------------------------------
+# Create store configuration override
+# This file will override store.war's MongoDB settings to use local MongoDB
+# -----------------------------------------------------------------------------
+RUN mkdir -p /opt/store-config && \
+    cat > /opt/store-config/application-docker.yml << 'EOF'
+spring:
+  data:
+    mongodb:
+      uri: mongodb://localhost:27017/store
+      database: store
+
+# Disable ClamAV (antivirus) for local development
+clamd:
+  enable: false
+EOF
+
+# -----------------------------------------------------------------------------
+# Start Script - Comprehensive initialization
+# -----------------------------------------------------------------------------
+RUN cat > /start.sh << 'STARTSCRIPT'
 #!/bin/bash
 set -e
+
+# Configuration
 APP_PORT=${APP_PORT:-8080}
 APP_HOST=${APP_HOST:-localhost}
 MONGO_MAX_WAIT=${MONGO_MAX_WAIT:-60}
 TOMCAT_MAX_WAIT=${TOMCAT_MAX_WAIT:-180}
+STORE_MAX_WAIT=${STORE_MAX_WAIT:-60}
+
 echo "============================================"
 echo "  CueBox Docker Container Starting"
 echo "============================================"
-echo "  Target URL: http://${APP_HOST}:${APP_PORT}"
+echo "  External URL: http://${APP_HOST}:${APP_PORT}"
+echo "  Internal URL: http://localhost:8080"
 echo "============================================"
+
+# =============================================================================
+# Step 1: Start MongoDB
+# =============================================================================
+echo "[INFO] Cleaning up any stale MongoDB processes..."
 pkill -9 mongod 2>/dev/null || true
 sleep 1
 rm -f /data/db/mongod.lock /data/db/WiredTiger.lock /tmp/mongodb-*.sock 2>/dev/null || true
 mkdir -p /data/db && chmod 777 /data/db
 touch /var/log/mongodb.log && chmod 666 /var/log/mongodb.log
+
 echo "[INFO] Starting MongoDB..."
-mongod --dbpath /data/db --port 27017 --bind_ip 127.0.0.1 --fork --logpath /var/log/mongodb.log --logappend --noauth --wiredTigerCacheSizeGB 0.25 2>&1 || { echo "Failed to start MongoDB!"; cat /var/log/mongodb.log; exit 1; }
+mongod --dbpath /data/db \
+       --port 27017 \
+       --bind_ip 127.0.0.1 \
+       --fork \
+       --logpath /var/log/mongodb.log \
+       --logappend \
+       --noauth \
+       --wiredTigerCacheSizeGB 0.25 2>&1 || {
+    echo "[ERROR] Failed to start MongoDB!"
+    cat /var/log/mongodb.log
+    exit 1
+}
+
 echo "[INFO] Waiting for MongoDB..."
 for i in $(seq 1 $MONGO_MAX_WAIT); do
     if mongosh --quiet --eval "db.runCommand({ping:1}).ok" 2>/dev/null | grep -q "1"; then
         echo "[INFO] MongoDB is ready! (took ${i}s)"
         break
     fi
+    if [ $i -eq $MONGO_MAX_WAIT ]; then
+        echo "[ERROR] MongoDB failed to start within ${MONGO_MAX_WAIT}s"
+        cat /var/log/mongodb.log
+        exit 1
+    fi
     sleep 1
 done
+
+# =============================================================================
+# Step 2: Initialize Smartstore Configuration
+# CRITICAL: Use localhost:8080 for internal calls (nginx listens on both 80 and 8080)
+# =============================================================================
 echo "[INFO] Initializing smartstore configuration..."
-STORE_URL="http://${APP_HOST}:${APP_PORT}/store/api/smartdocs"
+STORE_URL="http://localhost:8080/store/api/smartdocs"
+
 mongosh --quiet << MONGOEOF
 db = db.getSiblingDB('smartstore');
 db.smartstore_config.drop();
@@ -456,31 +572,131 @@ db.smartstore_config.insertOne({
 });
 print('Config initialized: ' + db.smartstore_config.findOne({_id:'1000'}).server_url);
 MONGOEOF
+
+# =============================================================================
+# Step 3: Configure Store.war to use local MongoDB
+# =============================================================================
+if [ -f "$CATALINA_HOME/webapps/store.war" ]; then
+    echo "[INFO] Configuring store.war for local MongoDB..."
+    
+    # Wait for store.war to be extracted by Tomcat, then override config
+    # We'll do this after Tomcat starts
+else
+    echo "[WARNING] store.war not found! Document storage will not work."
+    echo "[WARNING] Please provide store.war via volume mount or STORE_WAR_URL build arg."
+fi
+
+# =============================================================================
+# Step 4: Start Tomcat
+# =============================================================================
 echo "[INFO] Starting Tomcat..."
 export JAVA_OPTS="-Dspring.profiles.active=prod -Xms512m -Xmx1024m -Djava.security.egd=file:/dev/./urandom"
 $CATALINA_HOME/bin/catalina.sh start
-echo "[INFO] Waiting for backend..."
+
+echo "[INFO] Waiting for backend (portal.war)..."
 for i in $(seq 1 $TOMCAT_MAX_WAIT); do
     HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:9090/portal/ 2>/dev/null || echo "000")
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ] || [ "$HTTP_CODE" = "401" ]; then
         echo "[INFO] Backend is ready! (took ${i}s, HTTP: $HTTP_CODE)"
         break
     fi
+    if [ $i -eq $TOMCAT_MAX_WAIT ]; then
+        echo "[ERROR] Backend failed to start within ${TOMCAT_MAX_WAIT}s"
+        tail -100 $CATALINA_HOME/logs/catalina.out
+        exit 1
+    fi
     sleep 1
 done
+
+# =============================================================================
+# Step 5: Configure Store.war MongoDB (after extraction)
+# =============================================================================
+if [ -f "$CATALINA_HOME/webapps/store.war" ]; then
+    echo "[INFO] Waiting for store.war to deploy..."
+    for i in $(seq 1 $STORE_MAX_WAIT); do
+        if [ -d "$CATALINA_HOME/webapps/store/WEB-INF/classes" ]; then
+            echo "[INFO] store.war extracted, applying local MongoDB configuration..."
+            
+            # Override MongoDB configuration to use local
+            CONFIG_FILE="$CATALINA_HOME/webapps/store/WEB-INF/classes/application.yml"
+            if [ -f "$CONFIG_FILE" ]; then
+                # Backup original
+                cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
+                
+                # Replace MongoDB URI with local
+                sed -i 's|uri: mongodb://[^[:space:]]*|uri: mongodb://localhost:27017/store|g' "$CONFIG_FILE"
+                
+                echo "[INFO] Store MongoDB configuration updated:"
+                grep -A2 "mongodb:" "$CONFIG_FILE" || true
+            fi
+            
+            # Also check for application.properties
+            PROPS_FILE="$CATALINA_HOME/webapps/store/WEB-INF/classes/application.properties"
+            if [ -f "$PROPS_FILE" ]; then
+                # Disable ClamAV for local
+                sed -i 's|clamd.enable=true|clamd.enable=false|g' "$PROPS_FILE" 2>/dev/null || true
+            fi
+            
+            # Trigger redeploy by touching the WAR
+            touch "$CATALINA_HOME/webapps/store.war"
+            echo "[INFO] Store.war marked for redeploy with new config"
+            
+            # Wait for redeploy
+            sleep 15
+            break
+        fi
+        sleep 2
+    done
+    
+    # Verify store is responding
+    echo "[INFO] Verifying store service..."
+    for i in $(seq 1 30); do
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:9090/store/ 2>/dev/null || echo "000")
+        if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ] || [ "$HTTP_CODE" = "401" ]; then
+            echo "[INFO] Store service is ready! (HTTP: $HTTP_CODE)"
+            break
+        fi
+        sleep 1
+    done
+fi
+
+# =============================================================================
+# Step 6: Final Status
+# =============================================================================
+echo ""
 echo "============================================"
 echo "  CueBox is Ready!"
 echo "============================================"
 echo "  Application URL: http://${APP_HOST}:${APP_PORT}"
 echo "  Smartstore URL:  ${STORE_URL}"
-echo "  Local MongoDB:   mongodb://127.0.0.1:27017/smartstore"
+echo "  Local MongoDB:   mongodb://127.0.0.1:27017"
+echo "  Databases:"
+echo "    - smartstore (config)"
+echo "    - store (documents)"
 echo "============================================"
+echo ""
+echo "[INFO] Checking final configuration..."
+mongosh --quiet --eval "print('Smartstore URL: ' + db.getSiblingDB('smartstore').smartstore_config.findOne({_id:'1000'}).server_url)"
+
+# Keep container running with nginx in foreground
 exec nginx -g "daemon off;"
-BASHEOF
+STARTSCRIPT
 
 RUN chmod +x /start.sh
+
+# -----------------------------------------------------------------------------
+# Health Check
+# -----------------------------------------------------------------------------
 HEALTHCHECK --interval=30s --timeout=15s --start-period=180s --retries=5 \
-    CMD curl -f http://localhost/health && pgrep mongod > /dev/null || exit 1
+    CMD curl -f http://localhost/health && \
+        curl -f http://localhost:8080/health && \
+        pgrep mongod > /dev/null && \
+        pgrep java > /dev/null || exit 1
+
+# -----------------------------------------------------------------------------
+# Expose ports and volumes
+# -----------------------------------------------------------------------------
 EXPOSE 80
-VOLUME ["/data/db"]
+VOLUME ["/data/db", "/opt/tomcat/logs"]
+
 ENTRYPOINT ["/start.sh"]
