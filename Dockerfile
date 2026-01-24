@@ -1,4 +1,6 @@
-
+# =============================================================================
+# Stage 1: Build Frontend
+# =============================================================================
 FROM node:18-alpine AS frontend-build
 WORKDIR /app
 RUN apk add --no-cache git
@@ -24,9 +26,9 @@ ENV CI=false NX_DAEMON=false
 RUN npm run build -- --configuration=production
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Stage 2: Build Backend
-# -----------------------------------------------------------------------------
+# =============================================================================
 FROM maven:3.9-eclipse-temurin-17 AS backend-build
 WORKDIR /app
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
@@ -362,9 +364,23 @@ RUN mvn clean package -DskipTests -q -Pwar
 RUN ls -la target/*.war || (echo "WAR file not created!" && exit 1)
 
 
-# -----------------------------------------------------------------------------
-# Stage 3: Final Runtime Image
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Stage 3: Download Store.war from GitHub Releases
+# =============================================================================
+FROM alpine:latest AS store-download
+
+RUN apk add --no-cache curl
+
+# Download store.war from GitHub Releases
+# URL: https://github.com/CueboxTech/cuebox-docker/releases/download/store/store.war
+RUN curl -L -o /store.war https://github.com/CueboxTech/cuebox-docker/releases/download/store/store.war && \
+    ls -lh /store.war && \
+    echo "store.war downloaded successfully ($(du -h /store.war | cut -f1))"
+
+
+# =============================================================================
+# Stage 4: Final Runtime Image
+# =============================================================================
 FROM ubuntu:22.04
 
 # Install dependencies
@@ -391,16 +407,15 @@ COPY --from=frontend-build /app/dist/demo1 /var/www/html
 COPY --from=backend-build /app/target/*.war $CATALINA_HOME/webapps/portal.war
 
 # -----------------------------------------------------------------------------
-# CRITICAL: Download store.war from GitHub release
-# This is a pre-built smartstore service for document storage
+# Copy store.war from GitHub Releases (Stage 3)
 # -----------------------------------------------------------------------------
-ARG STORE_WAR_URL=""
-RUN if [ -n "$STORE_WAR_URL" ]; then \
-        echo "Downloading store.war from: $STORE_WAR_URL" && \
-        curl -L -o $CATALINA_HOME/webapps/store.war "$STORE_WAR_URL"; \
-    else \
-        echo "WARNING: STORE_WAR_URL not provided. Store.war must be added manually or via volume mount."; \
-    fi
+COPY --from=store-download /store.war $CATALINA_HOME/webapps/store.war
+
+# Verify both WAR files are present
+RUN ls -lh $CATALINA_HOME/webapps/*.war && \
+    echo "=== WAR files ready ===" && \
+    echo "portal.war: $(du -h $CATALINA_HOME/webapps/portal.war | cut -f1)" && \
+    echo "store.war: $(du -h $CATALINA_HOME/webapps/store.war | cut -f1)"
 
 # -----------------------------------------------------------------------------
 # Nginx Configuration
@@ -476,23 +491,6 @@ server {
 EOF
 
 # -----------------------------------------------------------------------------
-# Create store configuration override
-# This file will override store.war's MongoDB settings to use local MongoDB
-# -----------------------------------------------------------------------------
-RUN mkdir -p /opt/store-config && \
-    cat > /opt/store-config/application-docker.yml << 'EOF'
-spring:
-  data:
-    mongodb:
-      uri: mongodb://localhost:27017/store
-      database: store
-
-# Disable ClamAV (antivirus) for local development
-clamd:
-  enable: false
-EOF
-
-# -----------------------------------------------------------------------------
 # Start Script - Comprehensive initialization
 # -----------------------------------------------------------------------------
 RUN cat > /start.sh << 'STARTSCRIPT'
@@ -553,7 +551,6 @@ done
 
 # =============================================================================
 # Step 2: Initialize Smartstore Configuration
-# CRITICAL: Use localhost:8080 for internal calls (nginx listens on both 80 and 8080)
 # =============================================================================
 echo "[INFO] Initializing smartstore configuration..."
 STORE_URL="http://localhost:8080/store/api/smartdocs"
@@ -574,20 +571,7 @@ print('Config initialized: ' + db.smartstore_config.findOne({_id:'1000'}).server
 MONGOEOF
 
 # =============================================================================
-# Step 3: Configure Store.war to use local MongoDB
-# =============================================================================
-if [ -f "$CATALINA_HOME/webapps/store.war" ]; then
-    echo "[INFO] Configuring store.war for local MongoDB..."
-    
-    # Wait for store.war to be extracted by Tomcat, then override config
-    # We'll do this after Tomcat starts
-else
-    echo "[WARNING] store.war not found! Document storage will not work."
-    echo "[WARNING] Please provide store.war via volume mount or STORE_WAR_URL build arg."
-fi
-
-# =============================================================================
-# Step 4: Start Tomcat
+# Step 3: Start Tomcat
 # =============================================================================
 echo "[INFO] Starting Tomcat..."
 export JAVA_OPTS="-Dspring.profiles.active=prod -Xms512m -Xmx1024m -Djava.security.egd=file:/dev/./urandom"
@@ -609,7 +593,7 @@ for i in $(seq 1 $TOMCAT_MAX_WAIT); do
 done
 
 # =============================================================================
-# Step 5: Configure Store.war MongoDB (after extraction)
+# Step 4: Configure Store.war MongoDB (after extraction)
 # =============================================================================
 if [ -f "$CATALINA_HOME/webapps/store.war" ]; then
     echo "[INFO] Waiting for store.war to deploy..."
@@ -617,38 +601,26 @@ if [ -f "$CATALINA_HOME/webapps/store.war" ]; then
         if [ -d "$CATALINA_HOME/webapps/store/WEB-INF/classes" ]; then
             echo "[INFO] store.war extracted, applying local MongoDB configuration..."
             
-            # Override MongoDB configuration to use local
             CONFIG_FILE="$CATALINA_HOME/webapps/store/WEB-INF/classes/application.yml"
             if [ -f "$CONFIG_FILE" ]; then
-                # Backup original
                 cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
-                
-                # Replace MongoDB URI with local
                 sed -i 's|uri: mongodb://[^[:space:]]*|uri: mongodb://localhost:27017/store|g' "$CONFIG_FILE"
-                
-                echo "[INFO] Store MongoDB configuration updated:"
-                grep -A2 "mongodb:" "$CONFIG_FILE" || true
+                echo "[INFO] Store MongoDB configuration updated"
             fi
             
-            # Also check for application.properties
             PROPS_FILE="$CATALINA_HOME/webapps/store/WEB-INF/classes/application.properties"
             if [ -f "$PROPS_FILE" ]; then
-                # Disable ClamAV for local
                 sed -i 's|clamd.enable=true|clamd.enable=false|g' "$PROPS_FILE" 2>/dev/null || true
             fi
             
-            # Trigger redeploy by touching the WAR
             touch "$CATALINA_HOME/webapps/store.war"
             echo "[INFO] Store.war marked for redeploy with new config"
-            
-            # Wait for redeploy
             sleep 15
             break
         fi
         sleep 2
     done
     
-    # Verify store is responding
     echo "[INFO] Verifying store service..."
     for i in $(seq 1 30); do
         HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:9090/store/ 2>/dev/null || echo "000")
@@ -658,10 +630,12 @@ if [ -f "$CATALINA_HOME/webapps/store.war" ]; then
         fi
         sleep 1
     done
+else
+    echo "[WARNING] store.war not found!"
 fi
 
 # =============================================================================
-# Step 6: Final Status
+# Step 5: Final Status
 # =============================================================================
 echo ""
 echo "============================================"
@@ -670,32 +644,22 @@ echo "============================================"
 echo "  Application URL: http://${APP_HOST}:${APP_PORT}"
 echo "  Smartstore URL:  ${STORE_URL}"
 echo "  Local MongoDB:   mongodb://127.0.0.1:27017"
-echo "  Databases:"
-echo "    - smartstore (config)"
-echo "    - store (documents)"
 echo "============================================"
 echo ""
-echo "[INFO] Checking final configuration..."
 mongosh --quiet --eval "print('Smartstore URL: ' + db.getSiblingDB('smartstore').smartstore_config.findOne({_id:'1000'}).server_url)"
 
-# Keep container running with nginx in foreground
 exec nginx -g "daemon off;"
 STARTSCRIPT
 
 RUN chmod +x /start.sh
 
-# -----------------------------------------------------------------------------
 # Health Check
-# -----------------------------------------------------------------------------
 HEALTHCHECK --interval=30s --timeout=15s --start-period=180s --retries=5 \
     CMD curl -f http://localhost/health && \
         curl -f http://localhost:8080/health && \
         pgrep mongod > /dev/null && \
         pgrep java > /dev/null || exit 1
 
-# -----------------------------------------------------------------------------
-# Expose ports and volumes
-# -----------------------------------------------------------------------------
 EXPOSE 80
 VOLUME ["/data/db", "/opt/tomcat/logs"]
 
