@@ -45,7 +45,7 @@ RUN npm run build -- --configuration=production && \
 # =============================================================================
 FROM maven:3.9-eclipse-temurin-17 AS backend-build
 WORKDIR /app
-RUN apt-get update && apt-get install -y git unzip zip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
 ARG BACKEND_BRANCH=main
 
@@ -291,121 +291,19 @@ RUN sed -i "s|allowed-origins:.*|allowed-origins: '*'|g" src/main/resources/conf
     sed -i "s|allowed-origin-patterns:.*|allowed-origin-patterns: '*'|g" src/main/resources/config/application-dev.yml
 
 # =============================================================================
-# Build WAR first (before obfuscation)
+# Build WAR
+# =============================================================================
+# NOTE: ProGuard obfuscation disabled - breaks Spring Boot's reflection-based 
+# auto-configuration. Security is maintained through:
+# - Multi-stage build (no source code in image)
+# - MongoDB URI via Docker secrets (not in layers)
+# - Compiled bytecode (requires decompiler to read)
 # =============================================================================
 RUN mvn clean package -DskipTests -q -Pwar && \
-    mv target/*.war /app-original.war
+    mv target/*.war /app.war
 
-# =============================================================================
-# PROGUARD OBFUSCATION - Make reverse engineering harder
-# =============================================================================
-RUN curl -sL https://github.com/Guardsquare/proguard/releases/download/v7.4.2/proguard-7.4.2.zip -o /tmp/proguard.zip && \
-    unzip -q /tmp/proguard.zip -d /opt/ && \
-    rm /tmp/proguard.zip
-
-# Create ProGuard configuration for Spring Boot WAR
-RUN cat > /tmp/proguard.pro << 'PROGUARD'
-# =============================================================================
-# PROGUARD CONFIGURATION FOR SPRING BOOT WAR
-# =============================================================================
-
-# Input/Output
--injars /app-original.war(!META-INF/versions/**)
--outjars /app.war
-
-# Library JARs
--libraryjars <java.home>/jmods/java.base.jmod(!**.jar;!module-info.class)
--libraryjars <java.home>/jmods/java.logging.jmod(!**.jar;!module-info.class)
--libraryjars <java.home>/jmods/java.sql.jmod(!**.jar;!module-info.class)
--libraryjars <java.home>/jmods/java.desktop.jmod(!**.jar;!module-info.class)
--libraryjars <java.home>/jmods/java.naming.jmod(!**.jar;!module-info.class)
--libraryjars <java.home>/jmods/java.management.jmod(!**.jar;!module-info.class)
--libraryjars <java.home>/jmods/java.xml.jmod(!**.jar;!module-info.class)
--libraryjars <java.home>/jmods/java.instrument.jmod(!**.jar;!module-info.class)
-
-# Don't warn
--dontwarn **
--dontnote **
-
-# Keep attributes
--keepattributes SourceFile,LineNumberTable,*Annotation*,Signature,Exceptions,InnerClasses,EnclosingMethod
-
-# =============================================================================
-# SPRING BOOT RULES
-# =============================================================================
-
-# Keep main class
--keep class com.cuebox.portal.PortalApp { *; }
-
-# Keep Spring components
--keep @org.springframework.stereotype.Component class * { *; }
--keep @org.springframework.stereotype.Service class * { *; }
--keep @org.springframework.stereotype.Repository class * { *; }
--keep @org.springframework.stereotype.Controller class * { *; }
--keep @org.springframework.web.bind.annotation.RestController class * { *; }
--keep @org.springframework.context.annotation.Configuration class * { *; }
--keep @org.springframework.boot.autoconfigure.SpringBootApplication class * { *; }
-
-# Keep Bean methods
--keepclassmembers class * {
-    @org.springframework.context.annotation.Bean *;
-    @org.springframework.web.bind.annotation.* *;
-}
-
-# Keep JPA/MongoDB entities
--keep @org.springframework.data.mongodb.core.mapping.Document class * { *; }
--keep @jakarta.persistence.Entity class * { *; }
--keep class * extends org.springframework.data.repository.Repository { *; }
--keep interface * extends org.springframework.data.repository.Repository { *; }
-
-# Keep domain/DTO classes
--keep class com.cuebox.portal.domain.** { *; }
--keep class com.cuebox.portal.service.dto.** { *; }
--keep class com.cuebox.portal.web.rest.vm.** { *; }
--keep class com.cuebox.portal.config.** { *; }
-
-# =============================================================================
-# OBFUSCATION SETTINGS
-# =============================================================================
-
-# Repackage obfuscated classes
--repackageclasses 'c'
--allowaccessmodification
--optimizationpasses 3
--overloadaggressively
-
-# Keep public API
--keep public class com.cuebox.portal.web.rest.** { public <methods>; }
-
-# =============================================================================
-# LIBRARIES
-# =============================================================================
-
--keep class com.fasterxml.jackson.** { *; }
--keepclassmembers class * { @com.fasterxml.jackson.annotation.* *; }
--keep class io.swagger.v3.oas.** { *; }
--keep class org.springdoc.** { *; }
--keep class org.bson.** { *; }
--keep class com.mongodb.** { *; }
-
-# Enums and Serializable
--keepclassmembers enum * { public static **[] values(); public static ** valueOf(java.lang.String); }
--keepclassmembers class * implements java.io.Serializable {
-    static final long serialVersionUID;
-    private static final java.io.ObjectStreamField[] serialPersistentFields;
-    private void writeObject(java.io.ObjectOutputStream);
-    private void readObject(java.io.ObjectInputStream);
-    java.lang.Object writeReplace();
-    java.lang.Object readResolve();
-}
-PROGUARD
-
-# Run ProGuard (fallback to original if fails)
-RUN java -jar /opt/proguard-7.4.2/lib/proguard.jar @/tmp/proguard.pro 2>/dev/null || \
-    (echo "[WARN] ProGuard skipped - using original WAR" && cp /app-original.war /app.war)
-
-# Cleanup
-RUN rm -rf target src pom.xml .mvn /app-original.war /opt/proguard-7.4.2 /tmp/proguard.pro
+# Cleanup source
+RUN rm -rf target src pom.xml .mvn
 
 
 # =============================================================================
