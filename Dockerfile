@@ -1,18 +1,4 @@
-# =============================================================================
-# CUEBOX ENTERPRISE DOCKER IMAGE
-# =============================================================================
-# 
-# Build: MongoDB URI + ProGuard obfuscation via build secrets
-# Runtime: Only volume mount needed for document storage
-#
-# Usage:
-#   docker run -d -p 8080:80 -v cuebox-docs:/data/db ghcr.io/cueboxtech/cuebox:latest
-#
-# =============================================================================
 
-# =============================================================================
-# Stage 1: Build Frontend
-# =============================================================================
 FROM node:18-alpine AS frontend-build
 WORKDIR /app
 RUN apk add --no-cache git
@@ -28,7 +14,6 @@ RUN npm install --legacy-peer-deps --ignore-scripts && \
     npm install @nx/nx-linux-x64-musl --legacy-peer-deps --ignore-scripts || true && \
     npm rebuild || true
 
-# Configure frontend for Docker environment (relative URLs)
 RUN sed -i "s|baseURL:.*|baseURL: '/api',|g" src/environments/environment.prod.ts && \
     sed -i "s|appThemeName: 'Metronic'|appThemeName: 'CueBox'|g" src/environments/environment.prod.ts && \
     sed -i "s|appThemeName: 'Metronic'|appThemeName: 'CueBox'|g" src/environments/environment.ts && \
@@ -40,9 +25,6 @@ RUN npm run build -- --configuration=production && \
     rm -rf node_modules src package*.json
 
 
-# =============================================================================
-# Stage 2: Build Backend with ProGuard Obfuscation
-# =============================================================================
 FROM maven:3.9-eclipse-temurin-17 AS backend-build
 WORKDIR /app
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
@@ -54,15 +36,11 @@ RUN --mount=type=secret,id=github_token \
     https://$(cat /run/secrets/github_token)@github.com/CueboxTech/be.git . && \
     rm -rf .git
 
-# =============================================================================
-# SECURITY: MongoDB URI injected at BUILD TIME via Docker secret
-# =============================================================================
+
 RUN --mount=type=secret,id=mongodb_uri \
     sed -i "s|uri: mongodb://.*|uri: $(cat /run/secrets/mongodb_uri)|g" src/main/resources/config/application-prod.yml
 
-# -----------------------------------------------------------------------------
-# Create OpenApiConfig.java - Fix Swagger UI server URL
-# -----------------------------------------------------------------------------
+
 RUN mkdir -p src/main/java/com/cuebox/portal/config/ && \
     cat > src/main/java/com/cuebox/portal/config/OpenApiConfig.java << 'EOF'
 package com.cuebox.portal.config;
@@ -82,9 +60,7 @@ public class OpenApiConfig {
 }
 EOF
 
-# -----------------------------------------------------------------------------
-# Create SmartstoreLocalService.java - Handle local MongoDB for document storage
-# -----------------------------------------------------------------------------
+
 RUN cat > src/main/java/com/cuebox/portal/service/SmartstoreLocalService.java << 'EOF'
 package com.cuebox.portal.service;
 
@@ -212,9 +188,7 @@ public class SmartstoreLocalService {
 }
 EOF
 
-# -----------------------------------------------------------------------------
-# Create Attachmentresource.java
-# -----------------------------------------------------------------------------
+
 RUN cat > src/main/java/com/cuebox/portal/web/rest/Attachmentresource.java << 'EOF'
 package com.cuebox.portal.web.rest;
 
@@ -279,45 +253,29 @@ public class Attachmentresource {
 }
 EOF
 
-# -----------------------------------------------------------------------------
-# Patch DocumentClassifyAndExtractService.java
-# -----------------------------------------------------------------------------
+
 RUN sed -i 's/import com.cuebox.portal.repository.SmartstoreConfigRepository;/import com.cuebox.portal.repository.SmartstoreConfigRepository;\nimport com.cuebox.portal.service.SmartstoreLocalService;/' src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java && \
     sed -i 's/SmartstoreConfigRepository smartstoreConfigRepository;/SmartstoreConfigRepository smartstoreConfigRepository;\n\n\t@Autowired\n\tSmartstoreLocalService smartstoreLocalService;/' src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java && \
     sed -i 's/SmartstoreConfig smartstoreConfig = smartstoreConfigRepository.findById("1000").orElseThrow();/SmartstoreConfig smartstoreConfig = smartstoreLocalService.getConfig(); if (smartstoreConfig == null) { smartstoreConfig = smartstoreConfigRepository.findById("1000").orElseThrow(); }/' src/main/java/com/cuebox/portal/service/DocumentClassifyAndExtractService.java
 
-# Configure CORS
 RUN sed -i "s|allowed-origins:.*|allowed-origins: '*'|g" src/main/resources/config/application-dev.yml && \
     sed -i "s|allowed-origin-patterns:.*|allowed-origin-patterns: '*'|g" src/main/resources/config/application-dev.yml
 
-# =============================================================================
-# Build WAR
-# =============================================================================
-# NOTE: ProGuard obfuscation disabled - breaks Spring Boot's reflection-based 
-# auto-configuration. Security is maintained through:
-# - Multi-stage build (no source code in image)
-# - MongoDB URI via Docker secrets (not in layers)
-# - Compiled bytecode (requires decompiler to read)
-# =============================================================================
+
 RUN mvn clean package -DskipTests -q -Pwar && \
     mv target/*.war /app.war
 
-# Cleanup source
 RUN rm -rf target src pom.xml .mvn
 
 
-# =============================================================================
-# Stage 3: Download Store.war from GitHub Releases
-# =============================================================================
+
 FROM alpine:latest AS store-download
 RUN apk add --no-cache curl ca-certificates
 RUN curl -L -o /store.war https://github.com/CueboxTech/cuebox-docker/releases/download/store/store.war && \
     ls -lh /store.war
 
 
-# =============================================================================
-# Stage 4: Final Runtime Image
-# =============================================================================
+
 FROM ubuntu:22.04
 
 LABEL org.opencontainers.image.title="CueBox Enterprise" \
@@ -326,7 +284,6 @@ LABEL org.opencontainers.image.title="CueBox Enterprise" \
       org.opencontainers.image.version="1.0.0" \
       org.opencontainers.image.licenses="Proprietary"
 
-# Install packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openjdk-17-jre-headless nginx curl gnupg ca-certificates \
     && curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb.gpg \
@@ -335,10 +292,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
     && apt-get clean
 
-# Create directories
+
 RUN mkdir -p /data/db /var/log/cuebox && chmod 755 /data/db /var/log/cuebox
 
-# Install Tomcat
+
 ENV CATALINA_HOME=/opt/tomcat
 RUN mkdir -p $CATALINA_HOME && \
     curl -sL https://archive.apache.org/dist/tomcat/tomcat-10/v10.1.18/bin/apache-tomcat-10.1.18.tar.gz | \
@@ -347,14 +304,11 @@ RUN mkdir -p $CATALINA_HOME && \
     sed -i 's/port="8080"/port="9090"/g' $CATALINA_HOME/conf/server.xml && \
     sed -i 's/<Connector/<Connector server="CueBox" /g' $CATALINA_HOME/conf/server.xml
 
-# Copy built artifacts (OBFUSCATED)
 COPY --from=frontend-build /app/dist/demo1 /var/www/html
 COPY --from=backend-build /app.war $CATALINA_HOME/webapps/portal.war
 COPY --from=store-download /store.war $CATALINA_HOME/webapps/store.war
 
-# =============================================================================
-# NGINX CONFIGURATION
-# =============================================================================
+
 RUN cat > /etc/nginx/sites-available/default << 'NGINXCONF'
 server {
     listen 80;
@@ -366,18 +320,17 @@ server {
     index index.html;
     client_max_body_size 100M;
     
-    # Security Headers
+
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
     
-    # Block sensitive files
+
     location ~ /\. { deny all; return 404; }
     location ~* \.(git|env|config|yml|yaml|properties|bak|sql|log)$ { deny all; return 404; }
-    
-    # Frontend
+
     location / {
         try_files $uri $uri/ /index.html;
         location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {
@@ -386,7 +339,7 @@ server {
         }
     }
     
-    # Backend API
+
     location /api/ {
         proxy_pass http://127.0.0.1:9090/portal/api/;
         proxy_http_version 1.1;
@@ -400,7 +353,7 @@ server {
         client_max_body_size 100M;
     }
     
-    # Portal (Swagger)
+
     location /portal/ {
         proxy_pass http://127.0.0.1:9090/portal/;
         proxy_set_header Host $host;
@@ -409,8 +362,7 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         client_max_body_size 100M;
     }
-    
-    # Smartstore
+
     location /store/ {
         proxy_pass http://127.0.0.1:9090/store/;
         proxy_set_header Host $host;
@@ -431,9 +383,7 @@ server {
 }
 NGINXCONF
 
-# =============================================================================
-# ENTRYPOINT SCRIPT
-# =============================================================================
+
 RUN cat > /entrypoint.sh << 'ENTRYPOINT'
 #!/bin/bash
 set -e
@@ -445,7 +395,6 @@ echo "=============================================="
 echo "  CueBox Enterprise"
 echo "=============================================="
 
-# Start local MongoDB (document storage only)
 echo "[INFO] Starting local MongoDB..."
 rm -f /data/db/mongod.lock /data/db/WiredTiger.lock 2>/dev/null || true
 mkdir -p /data/db
@@ -460,7 +409,6 @@ for i in $(seq 1 30); do
 done
 echo "[OK] Local MongoDB ready"
 
-# Initialize smartstore config
 mongosh --quiet << MONGO
 db = db.getSiblingDB('smartstore');
 db.smartstore_config.drop();
@@ -476,7 +424,6 @@ db.smartstore_config.insertOne({
 MONGO
 echo "[OK] Smartstore config initialized"
 
-# Start Tomcat
 echo "[INFO] Starting Tomcat..."
 export JAVA_OPTS="-Dspring.profiles.active=prod -Xms512m -Xmx1024m -Djava.security.egd=file:/dev/./urandom"
 $CATALINA_HOME/bin/catalina.sh start
@@ -489,7 +436,7 @@ for i in $(seq 1 180); do
     sleep 1
 done
 
-# Configure store.war
+
 if [ -f "$CATALINA_HOME/webapps/store.war" ]; then
     echo "[INFO] Configuring store service..."
     for i in $(seq 1 60); do
@@ -526,11 +473,11 @@ ENTRYPOINT
 
 RUN chmod +x /entrypoint.sh
 
-# Cleanup
+
 RUN rm -rf /root/.bash_history /root/.cache /tmp/* \
     && find /var/log -type f -name "*.log" -delete 2>/dev/null || true
 
-# Health check
+
 HEALTHCHECK --interval=30s --timeout=15s --start-period=180s --retries=5 \
     CMD curl -sf http://localhost/health > /dev/null && \
         pgrep mongod > /dev/null && \
