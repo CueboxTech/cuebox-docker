@@ -24,9 +24,7 @@ env:
   IMAGE_NAME: cueboxtech/cuebox
 
 jobs:
-  # ===========================================================================
-  # Build & Push
-  # ===========================================================================
+
   build:
     name: Build & Push
     runs-on: ubuntu-latest
@@ -126,9 +124,7 @@ jobs:
           echo "- ✅ Security headers enabled" >> $GITHUB_STEP_SUMMARY
 
 
-  # ===========================================================================
-  # Security Scan with Trivy
-  # ===========================================================================
+
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
@@ -169,9 +165,7 @@ jobs:
           severity: 'CRITICAL,HIGH'
 
 
-  # ===========================================================================
-  # Verify Image Security
-  # ===========================================================================
+
   verify:
     name: Verify Security
     runs-on: ubuntu-latest
